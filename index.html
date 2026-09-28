@@ -13,7 +13,7 @@
   Tokens live in memory only (no localStorage, no cookies). See README.md for which Supabase Auth
   endpoints are verified and which are not.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-+SY7ERMKB5NmprxzXNen3+qC2bhdrtzBoKGO0+wiG1M='; style-src 'sha256-x/oyfxJ+2lkGhmXxaEDxf7PPNlPB45vIjUojzu8+QKs='; connect-src https://znmpucfeifpscunuatkl.supabase.co; img-src 'none'; form-action 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-4j17X4dVcPcbQ7UqBFXaeOTenjLrQghO3w+HxRv1j1E='; style-src 'sha256-x/oyfxJ+2lkGhmXxaEDxf7PPNlPB45vIjUojzu8+QKs='; connect-src https://znmpucfeifpscunuatkl.supabase.co; img-src 'none'; form-action 'none'; base-uri 'none'">
 <meta name="brain-supabase-url" content="https://znmpucfeifpscunuatkl.supabase.co">
 <meta name="brain-publishable-key" content="sb_publishable_kKiwnmTmgK5uMRNzuBSMKg_AqEwzhIp">
 <title>brain authorization</title>
@@ -52,12 +52,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
     <button class="primary" type="submit">Sign in</button>
   </form>
 
-  <form id="totp" class="panel" hidden>
-    <label for="code">Authenticator code</label>
-    <input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
-    <button class="primary" type="submit">Verify</button>
-  </form>
-
   <section id="consent" class="panel" hidden>
     <dl>
       <dt>App</dt><dd id="client-name"></dd>
@@ -81,7 +75,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
   const KEY = meta('brain-publishable-key');
   const authorizationId = new URLSearchParams(window.location.search).get('authorization_id');
   let session = null; // {access_token, ...}: memory only
-  let factorId = null;
   let details = null;
 
   function say(text, isError) {
@@ -89,7 +82,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
     $('status').className = isError ? 'error' : '';
   }
   function only(id) {
-    for (const p of ['signin', 'totp', 'consent']) $(p).hidden = p !== id;
+    for (const p of ['signin', 'consent']) $(p).hidden = p !== id;
   }
   function fail(text) {
     only(null);
@@ -132,7 +125,10 @@ dd { margin: 0; overflow-wrap: anywhere; }
     for (const b of form.querySelectorAll('button')) b.disabled = on;
   }
 
-  // 1. Password
+  // 1. Password. No TOTP step: verifying a TOTP factor makes Supabase Auth delete every aal1
+  // session of the user (InvalidateSessionsWithAALLessThan), and the apps' OAuth connections are
+  // aal1 sessions, so each sign-in here disconnected every other app. The consent endpoint does not
+  // check the MFA level anyway; the real controls are the pinned confidential clients.
   $('signin').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     busy($('signin'), true);
@@ -140,13 +136,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
     try {
       session = await api('/token?grant_type=password', { method: 'POST', body: { email: $('email').value.trim(), password: $('password').value } });
       $('password').value = '';
-      const user = await api('/user', { token: session.access_token });
-      const totp = (user.factors || []).filter((f) => f.factor_type === 'totp' && f.status === 'verified');
-      if (totp.length === 0) return fail('This account has no verified TOTP factor; this page requires one.');
-      factorId = totp[0].id;
-      only('totp');
-      say('Enter the code from your authenticator app.');
-      $('code').focus();
+      await loadDetails();
     } catch (err) {
       session = null;
       say(`Sign-in failed: ${err.message}`, true);
@@ -155,28 +145,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
     }
   });
 
-  // 2. TOTP (the session must reach aal2 before anything is shown)
-  $('totp').addEventListener('submit', async (ev) => {
-    ev.preventDefault();
-    busy($('totp'), true);
-    say('Verifying…');
-    try {
-      const challenge = await api(`/factors/${encodeURIComponent(factorId)}/challenge`, { method: 'POST', token: session.access_token, body: {} });
-      const verified = await api(`/factors/${encodeURIComponent(factorId)}/verify`, {
-        method: 'POST', token: session.access_token, body: { challenge_id: challenge.id, code: $('code').value.trim() },
-      });
-      $('code').value = '';
-      if (!verified || !verified.access_token || jwtClaims(verified.access_token).aal !== 'aal2') throw new Error('the session did not reach aal2');
-      session = verified;
-      await loadDetails();
-    } catch (err) {
-      say(`Verification failed: ${err.message}`, true);
-    } finally {
-      busy($('totp'), false);
-    }
-  });
-
-  // 3. What is being authorized
+  // 2. What is being authorized
   async function loadDetails() {
     say('Loading the request…');
     details = await api(`/oauth/authorizations/${encodeURIComponent(authorizationId)}`, { token: session.access_token });
@@ -195,7 +164,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
     say('Check the app and the address it returns to, then approve or deny.');
   }
 
-  // 4. Approve or deny
+  // 3. Approve or deny
   async function decide(action) {
     busy($('consent'), true);
     say(action === 'approve' ? 'Approving…' : 'Denying…');
